@@ -1,62 +1,38 @@
 package upload
 
 import (
-	"fmt"
-	"log"
+	"os"
 	"shazam/internal/audio"
+	"shazam/internal/db"
 	"shazam/internal/fingerprint"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
-func InitUpload() *gin.Engine {
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.Default()
+func FingerprintAPI(c *gin.Context) {
+	song, err := c.FormFile("song")
+	if err != nil {
+		panic(err)
+	}
 
-	r.POST("/upload", UploadSong)
-	return r
+	songFile, err := song.Open()
+	if err != nil {
+		panic(err)
+	}
+	defer songFile.Close()
+	songs, err := os.Open("")
+	if err != nil {
+		panic(err)
+	}
+	defer songs.Close()
+	samples, err := audio.DownSamplingAudio(songs)
+	hashes := fingerprint.Fingerprint(samples, song.Filename)
+	CreateHash(hashes, db.DB)
 }
 
-func UploadSong(c *gin.Context) {
-	type Songs struct {
-		Songs []string `form:"songs" binding:"required"`
+func CreateHash(hashes []db.Fingerprint, DB *gorm.DB) {
+	if err := DB.CreateInBatches(&hashes, 4000).Error; err != nil {
+		panic(err)
 	}
-	file, err := c.FormFile("file")
-	if err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-	var songs Songs
-	err = c.ShouldBind(&songs)
-	if err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-	for _, song := range songs.Songs {
-		err = c.SaveUploadedFile(file, "../../../assets/"+song)
-		if err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
-			return
-		}
-		audio.ConvertToWAV("../../../assets/"+song, "../../../assets/"+song+".wav")
-
-		// 1. Load WAV
-		samples, rate, err := audio.ReadWavFile("../../../assets/" + song + ".wav")
-		if err != nil {
-			log.Fatal("Error reading wav:", err)
-		}
-		fmt.Printf("Read WAV @ %d Hz, %d samples\n", rate, len(samples))
-
-		// 2. Extract fingerprints
-		fp := fingerprint.ExtractFingerprints(samples, 2048, 512, 6, 5)
-		fmt.Printf("Generated %d fingerprints\n", len(fp))
-
-		// Print a few
-		for i := 0; i < 5 && i < len(fp); i++ {
-			fmt.Printf("[%02d] Hash: %s | Offset: %d\n", i, fp[i].Hash, fp[i].TimeOffset)
-		}
-	}
-
-	c.JSON(200, gin.H{"message": "success"})
-
 }

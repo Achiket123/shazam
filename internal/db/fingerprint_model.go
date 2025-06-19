@@ -5,28 +5,30 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type Fingerprint struct {
-	gorm.Model
-	Frequency1 int
-	Frequency2 int
-	Hash       string `gorm:"uniqueIndex:idx_hash_time_offset"`
-	TimeOffset int    `gorm:"uniqueIndex:idx_hash_time_offset"`
+	AnchorFreq float64
+	TargetFreq float64
+	TimeDelta  float64
+	AnchorTime float64 // The absolute time of the anchor peak
+	Hash       int64
 	SongID     string
 }
+
+var DB *gorm.DB
 
 var dsn = "host=localhost user=achiket password=8759 dbname=achiket port=5432 sslmode=disable TimeZone=Asia/Shanghai"
 
 func EstablishConn() *gorm.DB {
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		panic("failed to connect database")
 	}
-	err = db.AutoMigrate(&Fingerprint{})
-	if err != nil {
-		fmt.Println("failed to migrate database", err)
-		panic("failed to migrate database")
-	}
+	fmt.Println("connected to database")
+	DB = db
 	return db
 }
