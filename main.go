@@ -1,13 +1,9 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"runtime"
 	"shazam/internal/api/search"
-	"shazam/internal/audio"
 	"shazam/internal/db"
-	"shazam/internal/fingerprint"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -25,7 +21,7 @@ func main() {
 		AllowOrigins: []string{"*"},
 	}))
 	r.POST("/search", search.RecogniseSong)
-	r.Run("192.168.0.104:8081")
+	r.Run()
 
 	// files, err := os.ReadDir("samples")
 	// if err != nil {
@@ -44,23 +40,6 @@ func main() {
 	// 	}
 	// 	fmt.Printf("Processing file: %s\n", fileName)
 
-	fileName := "output.wav"
-	file, err := os.Open(fileName)
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
-	samples, err := audio.DownSamplingAudio(file)
-	if err != nil {
-		panic(err)
-	}
-	hashes := fingerprint.Fingerprint(samples, fileName)
-	fmt.Println(len(hashes))
-	matches := search.MatchHashes(hashes, DB)
-	fmt.Println(len(matches))
-	if len(matches) > 0 {
-		fmt.Println(matches)
-	}
 	// CreateHash(hashes, DB)
 	runtime.GC()
 	// }
