@@ -9,13 +9,25 @@ import (
 	"shazam/internal/db"
 	"shazam/internal/fingerprint"
 
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
 func main() {
 	DB := db.EstablishConn()
 	DB.AutoMigrate(&db.Fingerprint{})
-	// files, err := os.ReadDir("assets/audio")
+
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE"},
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept"},
+		AllowOrigins: []string{"*"},
+	}))
+	r.POST("/search", search.RecogniseSong)
+	r.Run("192.168.0.104:8081")
+
+	// files, err := os.ReadDir("samples")
 	// if err != nil {
 	// 	panic(err)
 	// }
@@ -33,7 +45,6 @@ func main() {
 	// 	fmt.Printf("Processing file: %s\n", fileName)
 
 	fileName := "output.wav"
-
 	file, err := os.Open(fileName)
 	if err != nil {
 		panic(err)

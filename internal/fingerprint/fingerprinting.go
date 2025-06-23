@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-// Constants for audio fingerprinting parameters.
-//
 // frameSize: Number of audio samples per analysis frame. Larger values improve frequency resolution, but reduce time resolution.
 // hopSize: Number of samples to advance for each frame (overlap = frameSize - hopSize).
 // sampleRate: Expected audio sample rate (Hz).
@@ -22,8 +20,8 @@ const (
 	window, threshold, maxPeaks = 11, 80, 20
 	WindowSize                  = 4096
 	HopSize                     = 2048
-	DeltaTMin                   = 0.1 // Minimum time delta between an anchor and its target (seconds)
-	DeltaTMax                   = 2.0 // Maximum time delta
+	DeltaTMin                   = 0.1
+	DeltaTMax                   = 2.0
 	DeltaFMax                   = 1000.0
 )
 
@@ -52,7 +50,7 @@ func Fingerprint(data *[]float64, fileName string) []db.Fingerprint {
 	spectrogram := Spectrogram(lpData)
 	fmt.Printf("LENGTH OF SPECTROGRAM : %v\n", len(spectrogram))
 
-	peaks := ExtractAdaptivePeaks(spectrogram, fileName)
+	peaks := ExtractRobustPeaks(spectrogram, fileName)
 
 	PEAKS = append(PEAKS, peaks...)
 	fmt.Printf("LENGTH OF PEAKS : %v\n", len(PEAKS))
