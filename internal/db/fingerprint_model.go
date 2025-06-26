@@ -13,7 +13,7 @@ type Fingerprint struct {
 	TargetFreq float64
 	TimeDelta  float64
 	AnchorTime float64
-	Hash       int64 `json:"hash"`
+	Hash       string `json:"hash"`
 	SongID     string
 }
 
