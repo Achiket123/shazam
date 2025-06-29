@@ -13,7 +13,7 @@ import (
 func main() {
 	DB := db.EstablishConn()
 	DB.AutoMigrate(&db.Fingerprint{})
-
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE"},
@@ -22,7 +22,7 @@ func main() {
 	}))
 
 	r.POST("/search", search.RecogniseSong)
-	r.Run("192.168.0.104:8081")
+	r.Run()
 
 	runtime.GC()
 
