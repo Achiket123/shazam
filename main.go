@@ -1,13 +1,9 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"runtime"
 	"shazam/internal/api/search"
-	"shazam/internal/audio"
 	"shazam/internal/db"
-	"shazam/internal/fingerprint"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -24,46 +20,11 @@ func main() {
 		AllowHeaders: []string{"Origin", "Content-Type", "Accept"},
 		AllowOrigins: []string{"*"},
 	}))
+
 	r.POST("/search", search.RecogniseSong)
 	r.Run("192.168.0.104:8081")
 
-	// files, err := os.ReadDir("samples")
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// for _, file := range files {
-	// 	splitData := strings.Split(file.Name(), ".")
-	// 	var fileName string
-	// 	if len(splitData) > 2 {
-	// 		fileName = strings.Join(splitData[:len(splitData)-1], ".")
-
-	// 	} else {
-	// 		fileName = splitData[0]
-
-	// 	}
-	// 	fmt.Printf("Processing file: %s\n", fileName)
-
-	fileName := "output.wav"
-	file, err := os.Open(fileName)
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
-	samples, err := audio.DownSamplingAudio(file)
-	if err != nil {
-		panic(err)
-	}
-	hashes := fingerprint.Fingerprint(samples, fileName)
-	fmt.Println(len(hashes))
-	matches := search.MatchHashes(hashes, DB)
-	fmt.Println(len(matches))
-	if len(matches) > 0 {
-		fmt.Println(matches)
-	}
-	// CreateHash(hashes, DB)
 	runtime.GC()
-	// }
 
 }
 
@@ -72,3 +33,57 @@ func CreateHash(hashes []db.Fingerprint, DB *gorm.DB) {
 		panic(err)
 	}
 }
+
+// func searchSong() {
+// 	file, err := os.Open("temp.wav")
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	defer file.Close()
+// 	samples, err := audio.DownSamplingAudio(file, "temp.wav")
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	fingerPrints := fingerprint.Fingerprint(samples, "song")
+// 	// Assuming fingerprint function takes []float64
+
+// 	_data, _ := search.MatchHashes(fingerPrints, db.DB)
+// 	fmt.Println("data", _data)
+
+// }
+
+// func FingerPrint() {
+// 	files, err := os.ReadDir("assets")
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	for _, file := range files {
+
+// 		splitData := strings.Split(file.Name(), ".")
+// 		var fileName string
+// 		if len(splitData) > 2 {
+// 			fileName = strings.Join(splitData[:len(splitData)-1], ".")
+
+// 		} else {
+// 			fileName = splitData[0]
+
+// 		}
+// 		fmt.Printf("Processing file: %s\n", fileName)
+// 		openfileName := "assets/" + fileName + ".wav"
+// 		file, err := os.Open(openfileName)
+// 		if err != nil {
+// 			panic(err)
+// 		}
+// 		defer file.Close()
+
+// 		samples, err := audio.DownSamplingAudio(file, "song.wav")
+// 		if err != nil {
+// 			panic(err)
+// 		}
+// 		fingerPrints := fingerprint.Fingerprint(samples, fileName)
+// 		CreateHash(fingerPrints, db.DB)
+
+// 	}
+// }

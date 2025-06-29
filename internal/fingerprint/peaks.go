@@ -1,100 +1,182 @@
 package fingerprint
 
 import (
-	"log"
+	"math"
 	"math/cmplx"
 	"shazam/internal/db"
 	"sort"
 )
 
-const FAN_OUT = 4
-const PEAK_TARGET_DENSITY = 30
-const SECONDS_PER_CHUNK = 1.0
+const (
+	FAN_OUT = 5
 
-func ExtractRobustPeaks(spectrogram [][]complex128, songID string) []Peak {
-	if len(spectrogram) == 0 || len(spectrogram[0]) == 0 {
-		return nil
+	TARGET_ZONE_DT_MAX_SECONDS = 2.0
+	TARGET_ZONE_FREQ_BAND_HZ   = 300.0
+
+	// Ensure SampleRate, WindowSize, HopSize are defined and accessible.
+	// Example values:
+
+	// FREQ_BIN_RESOLUTION should be consistent with SampleRate and WindowSize
+	FREQ_BIN_RESOLUTION = float64(SampleRate) / float64(WindowSize)
+)
+
+type Peak struct {
+	Time      float64
+	Frequency float64
+	Magnitude float64
+}
+
+// Assumed helper functions (from your previous code)
+func meanStd(data []float64) (float64, float64) {
+	if len(data) == 0 {
+		return 0, 0
 	}
-
-	numFrames := len(spectrogram)
-	numBins := len(spectrogram[0])
-	magnitudes := getMagnitudes(spectrogram)
-
-	candidatePeaks := []Peak{}
-	for t := 1; t < numFrames-1; t++ {
-		for f := 1; f < numBins-1; f++ {
-			amp := magnitudes[t][f]
-
-			if amp > magnitudes[t-1][f-1] && amp > magnitudes[t-1][f] && amp > magnitudes[t-1][f+1] &&
-				amp > magnitudes[t][f-1] && amp > magnitudes[t][f+1] &&
-				amp > magnitudes[t+1][f-1] && amp > magnitudes[t+1][f] && amp > magnitudes[t+1][f+1] {
-
-				candidatePeaks = append(candidatePeaks, Peak{
-					Time: float64(t),
-					Freq: float64(f),
-					Amp:  amp,
-				})
-			}
-		}
+	sum := 0.0
+	for _, v := range data {
+		sum += v
 	}
+	mean := sum / float64(len(data))
 
-	finalPeaks := make([]Peak, 0)
-	framesPerChunk := float64(SECONDS_PER_CHUNK) * float64(SampleRate) / float64(HopSize)
-	peaksPerChunk := int(PEAK_TARGET_DENSITY * SECONDS_PER_CHUNK)
-
-	for chunkStart := 0; chunkStart < len(candidatePeaks); {
-		chunkEnd := chunkStart
-
-		startTime := candidatePeaks[chunkStart].Time
-		for chunkEnd < len(candidatePeaks) && (candidatePeaks[chunkEnd].Time < startTime+float64(framesPerChunk)) {
-			chunkEnd++
-		}
-
-		chunk := candidatePeaks[chunkStart:chunkEnd]
-
-		if len(chunk) > 0 {
-
-			sort.Slice(chunk, func(i, j int) bool {
-				return chunk[i].Amp > chunk[j].Amp
-			})
-
-			limit := peaksPerChunk
-			if len(chunk) < limit {
-				limit = len(chunk)
-			}
-
-			for _, peak := range chunk[:limit] {
-
-				finalPeaks = append(finalPeaks, Peak{
-					Time: float64(peak.Time*float64(HopSize)) / float64(SampleRate),
-					Freq: float64(peak.Freq*float64(SampleRate)) / float64(WindowSize),
-					Amp:  peak.Amp,
-				})
-			}
-		}
-
-		chunkStart = chunkEnd
+	sumSqDiff := 0.0
+	for _, v := range data {
+		sumSqDiff += (v - mean) * (v - mean)
 	}
-
-	sort.Slice(finalPeaks, func(i, j int) bool {
-		return finalPeaks[i].Time < finalPeaks[j].Time
-	})
-
-	log.Printf("Found %d robust peaks for song '%s'.\n", len(finalPeaks), songID)
-	return finalPeaks
+	std := math.Sqrt(sumSqDiff / float64(len(data)))
+	return mean, std
 }
 
 func getMagnitudes(spectrogram [][]complex128) [][]float64 {
 	numFrames := len(spectrogram)
+	if numFrames == 0 {
+		return [][]float64{}
+	}
 	numBins := len(spectrogram[0])
 	magnitudes := make([][]float64, numFrames)
 	for t := 0; t < numFrames; t++ {
 		magnitudes[t] = make([]float64, numBins)
 		for f := 0; f < numBins; f++ {
-			magnitudes[t][f] = cmplx.Abs(spectrogram[t][f])
+			mags := cmplx.Abs(spectrogram[t][f]) // Use cmplx.Abs if available, or .Abs() if complex128 has it
+			if mags == 0 {
+				magnitudes[t][f] = -120.0 // dB floor for silence
+			} else {
+				magnitudes[t][f] = 20 * math.Log10(mags)
+			}
 		}
 	}
 	return magnitudes
+}
+
+func calculateFrequencyFromBin(binIndex int) float64 {
+	return float64(binIndex) * (float64(SampleRate) / float64(WindowSize))
+}
+
+// ExtractPeaks identifies significant peaks from the spectrogram.
+// It has been adjusted to potentially yield more fingerprints.
+func ExtractPeaks(spectrogram [][]complex128) []Peak {
+	if len(spectrogram) < 1 || len(spectrogram[0]) < 1 {
+		return []Peak{}
+	}
+
+	magnitudes := getMagnitudes(spectrogram)
+	numFrames := len(magnitudes)
+	numBins := len(magnitudes[0])
+	peaks := []Peak{}
+
+	// Neighborhood size for local maximum check (5x5 grid)
+	neighborhoodSizeTime := 2 // +/- 2 frames
+	neighborhoodSizeFreq := 2 // +/- 2 frequency bins
+
+	// Adjusted Z-score threshold to be less strict
+	// Lowering this value will increase the number of peaks detected.
+	zScoreThreshold := 1.8 // Changed from 3.0 to 1.8 (experiment with this value)
+
+	// Adjusted max peaks per frame to allow more peaks
+	// Increasing this value will increase the number of fingerprints.
+	maxPeaksPerFrame := 20 // Changed from 10 to 20 (experiment with this value)
+
+	// Z-score comparison neighborhood size (21x21 window for background contrast)
+	// Consider if this fixed size is appropriate for all frequency ranges.
+	zScoreComparisonWindow := 10 // +/- 10 frames/bins
+
+	for i := 0; i < numFrames; i++ {
+		currentFramePeaks := []Peak{}
+		for j := 0; j < numBins; j++ {
+			currentMagnitude := magnitudes[i][j]
+
+			// Skip very low magnitude points, as they are likely noise or silence
+			if currentMagnitude <= -100.0 { // -100 dB is a common low-energy threshold
+				continue
+			}
+
+			// --- Local Maximum Check ---
+			isLocalMaximum := true
+			for di := -neighborhoodSizeTime; di <= neighborhoodSizeTime; di++ {
+				for dj := -neighborhoodSizeFreq; dj <= neighborhoodSizeFreq; dj++ {
+					ni, nj := i+di, j+dj
+
+					// Ensure neighborhood indices are within bounds and not the current point itself
+					if ni >= 0 && ni < numFrames && nj >= 0 && nj < numBins && (di != 0 || dj != 0) {
+						if magnitudes[ni][nj] > currentMagnitude {
+							isLocalMaximum = false
+							break
+						}
+					}
+				}
+				if !isLocalMaximum {
+					break
+				}
+			}
+
+			if isLocalMaximum {
+				// --- Z-score Calculation for Contrastive Peaks ---
+				zScoreNeighborhood := []float64{}
+				// Collect magnitudes from the larger comparison window
+				for di := -zScoreComparisonWindow; di <= zScoreComparisonWindow; di++ {
+					for dj := -zScoreComparisonWindow; dj <= zScoreComparisonWindow; dj++ {
+						ni, nj := i+di, j+dj
+						if ni >= 0 && ni < numFrames && nj >= 0 && nj < numBins {
+							// Optionally, exclude the current peak itself from the Z-score mean/std calculation
+							// if (di != 0 || dj != 0) { ... }
+							zScoreNeighborhood = append(zScoreNeighborhood, magnitudes[ni][nj])
+						}
+					}
+				}
+
+				mean, std := meanStd(zScoreNeighborhood)
+				if std == 0 { // Avoid division by zero if all values in neighborhood are the same
+					continue
+				}
+				zScore := (currentMagnitude - mean) / std
+
+				// If the peak's Z-score meets the threshold, add it
+				if zScore >= zScoreThreshold {
+					peakTime := float64(i*HopSize) / float64(SampleRate)
+					peakFrequency := calculateFrequencyFromBin(j)
+					currentFramePeaks = append(currentFramePeaks, Peak{
+						Time:      peakTime,
+						Frequency: peakFrequency,
+						Magnitude: currentMagnitude,
+					})
+				}
+			}
+		}
+
+		// --- Limit and Sort Peaks Per Frame ---
+		// If more peaks are found than maxPeaksPerFrame, sort by magnitude and take the top N
+		if len(currentFramePeaks) > maxPeaksPerFrame {
+			// Sort peaks in the current frame by Magnitude in descending order
+			sort.Slice(currentFramePeaks, func(a, b int) bool {
+				return currentFramePeaks[a].Magnitude > currentFramePeaks[b].Magnitude
+			})
+			// Append only the top 'maxPeaksPerFrame' peaks
+			peaks = append(peaks, currentFramePeaks[:maxPeaksPerFrame]...)
+		} else {
+			// Append all found peaks if they are within the limit
+			peaks = append(peaks, currentFramePeaks...)
+		}
+	}
+
+	return peaks
 }
 
 func FindPeakRelationships(peaks []Peak, songID string) []db.Fingerprint {
@@ -104,40 +186,63 @@ func FindPeakRelationships(peaks []Peak, songID string) []db.Fingerprint {
 
 	fingerprints := []db.Fingerprint{}
 
-	for i, anchorPeak := range peaks {
+	for i, anchor := range peaks {
 
-		minTime := anchorPeak.Time + DeltaTMin
-		maxTime := anchorPeak.Time + DeltaTMax
+		targetZoneMinTime := anchor.Time
+		targetZoneMaxTime := anchor.Time + TARGET_ZONE_DT_MAX_SECONDS
+		targetZoneMinFreq := anchor.Frequency - TARGET_ZONE_FREQ_BAND_HZ
+		targetZoneMaxFreq := anchor.Frequency + TARGET_ZONE_FREQ_BAND_HZ
 
-		pairCount := 0
-
+		potentialTargets := []Peak{}
 		for j := i + 1; j < len(peaks); j++ {
-			targetPeak := peaks[j]
+			target := peaks[j]
 
-			if targetPeak.Time < minTime {
+			if target.Time >= targetZoneMinTime && target.Time <= targetZoneMaxTime &&
+				target.Frequency >= targetZoneMinFreq && target.Frequency <= targetZoneMaxFreq {
+				potentialTargets = append(potentialTargets, target)
+			}
+
+			if target.Time > targetZoneMaxTime {
+				break
+			}
+		}
+
+		numTargetsToConsider := int(math.Min(float64(len(potentialTargets)), float64(FAN_OUT)))
+
+		for k := 0; k < numTargetsToConsider; k++ {
+			target := potentialTargets[k]
+
+			deltaT := target.Time - anchor.Time
+
+			if deltaT <= 0 {
 				continue
 			}
 
-			if targetPeak.Time > maxTime {
-				break
-			}
+			anchorFreqBin := int(anchor.Frequency / FREQ_BIN_RESOLUTION)
+			targetFreqBin := int(target.Frequency / FREQ_BIN_RESOLUTION)
 
-			if pairCount >= FAN_OUT {
-				break
-			}
+			deltaMs := uint32(math.Round(deltaT * 1000))
 
-			deltaTime := targetPeak.Time - anchorPeak.Time
-			hash := int64(anchorPeak.Freq)&0xFFF<<20 | int64(targetPeak.Freq)&0xFFF<<8 | int64(deltaTime*100)&0xFF
+			const (
+				FREQ_BITS    = 9
+				DELTA_T_BITS = 14
+			)
+
+			maskedAnchorFreq := uint32(anchorFreqBin) & ((1 << FREQ_BITS) - 1)
+			maskedTargetFreq := uint32(targetFreqBin) & ((1 << FREQ_BITS) - 1)
+			maskedDeltaMs := deltaMs & ((1 << DELTA_T_BITS) - 1)
+
+			address := (maskedAnchorFreq << (FREQ_BITS + DELTA_T_BITS)) |
+				(maskedTargetFreq << DELTA_T_BITS) |
+				maskedDeltaMs
 
 			fingerprint := db.Fingerprint{
-
-				Hash:   hash,
-				SongID: songID,
+				SongID:     songID,
+				Hash:       address,
+				AnchorTime: anchor.Time,
 			}
 			fingerprints = append(fingerprints, fingerprint)
-			pairCount++
 		}
 	}
-	log.Printf("Created %d fingerprints for song '%s'.\n", len(fingerprints), songID)
 	return fingerprints
 }
