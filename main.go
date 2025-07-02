@@ -4,17 +4,15 @@ import (
 	"runtime"
 	"shazam/internal/api/search"
 	"shazam/internal/db"
- 
 
-	"github.com/go-audio/audio"
-	"github.com/go-audio/wav"
-	"gorm.io/gorm"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	DB := db.EstablishConn()
 	DB.AutoMigrate(&db.Fingerprint{})
- 
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
@@ -27,60 +25,59 @@ func main() {
 	r.Run()
 
 	runtime.GC()
- 
 
 }
 
-func FingerPrint() {
-	files, err := os.ReadDir("assets/audio")
-	if err != nil {
-		panic(err)
-	}
-	i := 0
+// func FingerPrint() {
+// 	files, err := os.ReadDir("assets/audio")
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	i := 0
 
-	for _, file := range files {
+// 	for _, file := range files {
 
-		splitData := strings.Split(file.Name(), ".")
-		var fileName string
-		if len(splitData) > 2 {
-			fileName = strings.Join(splitData[:len(splitData)-1], ".")
+// 		splitData := strings.Split(file.Name(), ".")
+// 		var fileName string
+// 		if len(splitData) > 2 {
+// 			fileName = strings.Join(splitData[:len(splitData)-1], ".")
 
-		} else {
-			fileName = splitData[0]
+// 		} else {
+// 			fileName = splitData[0]
 
-		}
-		fmt.Printf("Processing file: %s\n", fileName)
-		fileName = "assets/audio/" + fileName + ".wav"
-		file, err := os.Open(fileName)
-		if err != nil {
-			panic(err)
-		}
-		defer file.Close()
+// 		}
+// 		fmt.Printf("Processing file: %s\n", fileName)
+// 		fileName = "assets/audio/" + fileName + ".wav"
+// 		file, err := os.Open(fileName)
+// 		if err != nil {
+// 			panic(err)
+// 		}
+// 		defer file.Close()
 
-		wav.NewDecoder(file)
-		d := wav.NewDecoder(file)
-		d.FwdToPCM()
-		buf := audio.IntBuffer{
-			Data: make([]int, d.PCMChunk.Size/2),
-			Format: &audio.Format{
-				NumChannels: 1,
-				SampleRate:  44100,
-			},
-		}
+// 		wav.NewDecoder(file)
+// 		d := wav.NewDecoder(file)
+// 		d.FwdToPCM()
+// 		buf := audio.IntBuffer{
+// 			Data: make([]int, d.PCMChunk.Size/2),
+// 			Format: &audio.Format{
+// 				NumChannels: 1,
+// 				SampleRate:  44100,
+// 			},
+// 		}
 
-		_, err = d.PCMBuffer(&buf)
-		if err != nil {
-			panic(err)
-		}
-		samples := buf.AsFloatBuffer().Data
-		fingerPrints := fingerprint.Fingerprint(&samples, fileName)
-		CreateHash(fingerPrints, db.DB)
-		i++
-		if i == 30 {
-			break
-		}
-	}
-}
+// 		_, err = d.PCMBuffer(&buf)
+// 		if err != nil {
+// 			panic(err)
+// 		}
+// 		samples := buf.AsFloatBuffer().Data
+// 		fingerPrints := fingerprint.Fingerprint(&samples, fileName)
+// 		CreateHash(fingerPrints, db.DB)
+// 		i++
+// 		if i == 30 {
+// 			break
+// 		}
+// 	}
+// }
 
 // func searchSong() {
 // 	file, err := os.Open("temp.wav")
