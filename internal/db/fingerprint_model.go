@@ -2,26 +2,34 @@ package db
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
 type Fingerprint struct {
-	AnchorFreq float64
-	TargetFreq float64
-	TimeDelta  float64
-	AnchorTime float64
-	Hash       string `json:"hash"`
+
+	Hash       uint32  `json:"hash"`
+	AnchorTime float64 `json:"anchor_time"`
 	SongID     string
 }
 
 var DB *gorm.DB
 
-var dsn = "host=localhost user=postgres password=8759 dbname=achiket port=5432 sslmode=disable TimeZone=Asia/Shanghai"
-
 func EstablishConn() *gorm.DB {
+
+	godotenv.Load()
+	HOST, _ := os.LookupEnv("HOST")
+	DBNAME, _ := os.LookupEnv("DBNAME")
+	USER, _ := os.LookupEnv("USER")
+	PASS, _ := os.LookupEnv("PASS")
+	SSLMODE, _ := os.LookupEnv("SSLMODE")
+	PORT, _ := os.LookupEnv("PORT")
+
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=Asia/Shanghai", HOST, USER, PASS, DBNAME, PORT, SSLMODE)
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})

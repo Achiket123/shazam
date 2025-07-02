@@ -16,52 +16,36 @@ import (
 // fanout: Number of target peaks to pair with each anchor peak for fingerprint generation.
 // maxDeltaT: Maximum time difference (in frames) between anchor and target peaks for fingerprinting.
 const (
-	SampleRate                  = 44100
+	SampleRate                  = 8000
 	window, threshold, maxPeaks = 11, 80, 20
-	WindowSize                  = 4096
-	HopSize                     = 2048
+	WindowSize                  = 1024
+	HopSize                     = 512
 	DeltaTMin                   = 0.1
 	DeltaTMax                   = 2.0
 	DeltaFMax                   = 1000.0
 )
 
-var FREQ_BANDS = [][]float64{
-	{30, 100},    // Low bass
-	{100, 250},   // Upper bass
-	{250, 500},   // Low mids
-	{500, 1000},  // Mids
-	{1000, 2500}, // High mids
-	{2500, 5000}, // Presence
-}
-
-type Peak struct {
-	Time float64
-	Freq float64
-	Amp  float64
-}
+var FREQ_BANDS = []struct{ min, max int }{{0, 10}, {10, 20}, {20, 40}, {40, 80}, {80, 160}, {160, 512}}
 
 func Fingerprint(data *[]float64, fileName string) []db.Fingerprint {
 	start := time.Now().Nanosecond()
 
-	var PEAKS []Peak
-
 	fmt.Printf("LENGTH OF DATA : %v\n", len(*data))
-	lpData := LowpassFilter(*data, 1000, SampleRate)
-	spectrogram := Spectrogram(lpData)
+
+	spectrogram := Spectrogram(*data)
 	fmt.Printf("LENGTH OF SPECTROGRAM : %v\n", len(spectrogram))
 
-	peaks := ExtractRobustPeaks(spectrogram, fileName)
+	peaks := ExtractPeaks(spectrogram)
+	fmt.Printf("LENGTH OF ROBUST PEAKS : %v\n", len(peaks))
 
-	PEAKS = append(PEAKS, peaks...)
-	fmt.Printf("LENGTH OF PEAKS : %v\n", len(PEAKS))
-
-	pairs := FindPeakRelationships(PEAKS, fileName)
+	pairs := FindPeakRelationships(peaks, fileName)
 	fmt.Printf("LENGTH OF PEAK PAIRS %v\n", len(pairs))
 	end := time.Now().Nanosecond()
 
 	timeto := end - start
 	fmt.Printf("END : %v\n", end)
 	fmt.Printf("START : %v\n", start)
+
 	fmt.Printf("TIME TO READ : %v\n", timeto)
 
 	return pairs

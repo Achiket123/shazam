@@ -3,29 +3,23 @@ package fingerprint
 import (
 	"image"
 	"image/color"
+	"image/png"
 	"math"
 	"math/cmplx"
-)
-
-const (
-	frameSize  = 4096
-	hopSize    = 2058
-	windowSize = frameSize
-	scaleX     = 4
-	scaleY     = 1
+	"os"
 )
 
 func Spectrogram(data []float64) [][]complex128 {
 	spectrogram := make([][]complex128, 0)
 	Length := len(data)
-	for start := 0; start+windowSize <= Length; start += hopSize {
+	for start := 0; start+WindowSize <= Length; start += HopSize {
 
-		frame := data[start : start+windowSize]
+		frame := data[start : start+WindowSize]
 		window := ApplyHanningWindow(frame)
 
 		spectrum := FFT(window)
 
-		spectrogram = append(spectrogram, spectrum[:hopSize])
+		spectrogram = append(spectrogram, spectrum[:HopSize])
 	}
 
 	return spectrogram
@@ -47,68 +41,91 @@ func createSpectrogramImage(spectrogram [][]complex128) image.Image {
 	numFrames := len(spectrogram)
 	numBins := len(spectrogram[0])
 
+	// --- Step 1: Calculate optimal width and height for 16:9 aspect ---
+	scaleFactor := 4 // Increase this for higher resolution
+	width := numFrames * scaleFactor
+	height := (width * 9) / 16 // Maintain 16:9 aspect ratio
+
+	if height > numBins*scaleFactor {
+		height = numBins * scaleFactor
+		width = (height * 16) / 9
+	}
+
+	// --- Step 2: Prepare magnitude data ---
 	magnitudes := make([][]float64, numFrames)
 	maxMagnitude := -1e9
 
 	for i, frame := range spectrogram {
 		magnitudes[i] = make([]float64, numBins)
 		for j, c := range frame {
-
 			mag := cmplx.Abs(c)
-
 			db := 20 * math.Log10(mag+1e-9)
 			magnitudes[i][j] = db
-
 			if db > maxMagnitude {
 				maxMagnitude = db
 			}
 		}
 	}
-
 	minDB := maxMagnitude - 80.0
-	img := image.NewRGBA(image.Rect(0, 0, numFrames, numBins))
 
-	for x := 0; x < numFrames; x++ {
-		for y := 0; y < numBins; y++ {
-			val := (magnitudes[x][y] - minDB) / (maxMagnitude - minDB)
-			val = max(0.0, min(1.0, val))
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
 
-			c := mapToColor(val)
+	for x := 0; x < width; x++ {
+		spectroX := (x * numFrames) / width
+		for y := 0; y < height; y++ {
+			spectroY := (y * numBins) / height
+			val := (magnitudes[spectroX][spectroY] - minDB) / (maxMagnitude - minDB)
+			val = math.Max(0.0, math.Min(1.0, val))
+			c := MapToColor(val)
 
-			if x%scaleX == 0 && y%scaleY == 0 {
-				img.Set(x/scaleX, (numBins-1-y)/scaleY, c)
-			}
+			img.Set(x, height-1-y, c) // Flip vertically
 		}
 	}
+
+	// --- Step 4: Save image ---
+	file, err := os.Create("spectrogram_hd.png")
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	png.Encode(file, img)
 
 	return img
 }
 
-func mapToColor(value float64) color.Color {
+func MapToColor(val float64) color.Color {
 
-	value = math.Max(0, math.Min(1, value))
+	if val < 0 {
+		val = 0
+	}
+	if val > 1 {
+		val = 1
+	}
 
 	var r, g, b uint8
-	if value < 0.25 {
+
+	switch {
+	case val < 0.25:
 
 		r = 0
-		g = uint8(4 * value * 255)
+		g = uint8(255 * (val / 0.25))
 		b = 255
-	} else if value < 0.5 {
+	case val < 0.5:
 
 		r = 0
 		g = 255
-		b = uint8(255 * (1 - 4*(value-0.25)))
-	} else if value < 0.75 {
+		b = uint8(255 * (1 - ((val - 0.25) / 0.25)))
+	case val < 0.75:
 
-		r = uint8(255 * 4 * (value - 0.5))
+		r = uint8(255 * ((val - 0.5) / 0.25))
 		g = 255
 		b = 0
-	} else {
+	default:
 
 		r = 255
-		g = uint8(255 * (1 - 4*(value-0.75)))
+		g = uint8(255 * (1 - ((val - 0.75) / 0.25)))
 		b = 0
 	}
+
 	return color.RGBA{R: r, G: g, B: b, A: 255}
 }
