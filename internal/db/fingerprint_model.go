@@ -11,6 +11,7 @@ import (
 )
 
 type Fingerprint struct {
+
 	Hash       uint32  `json:"hash"`
 	AnchorTime float64 `json:"anchor_time"`
 	SongID     string

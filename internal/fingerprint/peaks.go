@@ -1,21 +1,24 @@
 package fingerprint
 
 import (
+ 
+ 
 	"math"
 	"math/cmplx"
 	"shazam/internal/db"
 	"sort"
 )
 
-const (
+const ( 
 	FAN_OUT = 5
+ 
 
 	TARGET_ZONE_DT_MAX_SECONDS = 2.0
 	TARGET_ZONE_FREQ_BAND_HZ   = 300.0
 
 	// Ensure SampleRate, WindowSize, HopSize are defined and accessible.
 	// Example values:
-
+ 
 	// FREQ_BIN_RESOLUTION should be consistent with SampleRate and WindowSize
 	FREQ_BIN_RESOLUTION = float64(SampleRate) / float64(WindowSize)
 )
@@ -60,12 +63,13 @@ func getMagnitudes(spectrogram [][]complex128) [][]float64 {
 				magnitudes[t][f] = -120.0 // dB floor for silence
 			} else {
 				magnitudes[t][f] = 20 * math.Log10(mags)
+ 
 			}
 		}
 	}
 	return magnitudes
 }
-
+ 
 func calculateFrequencyFromBin(binIndex int) float64 {
 	return float64(binIndex) * (float64(SampleRate) / float64(WindowSize))
 }
@@ -81,11 +85,12 @@ func ExtractPeaks(spectrogram [][]complex128) []Peak {
 	numFrames := len(magnitudes)
 	numBins := len(magnitudes[0])
 	peaks := []Peak{}
+ 
 
 	// Neighborhood size for local maximum check (5x5 grid)
 	neighborhoodSizeTime := 2 // +/- 2 frames
 	neighborhoodSizeFreq := 2 // +/- 2 frequency bins
-
+ 
 	// Adjusted Z-score threshold to be less strict
 	// Lowering this value will increase the number of peaks detected.
 	zScoreThreshold := 1.8 // Changed from 3.0 to 1.8 (experiment with this value)
@@ -107,6 +112,7 @@ func ExtractPeaks(spectrogram [][]complex128) []Peak {
 			if currentMagnitude <= -100.0 { // -100 dB is a common low-energy threshold
 				continue
 			}
+
 
 			// --- Local Maximum Check ---
 			isLocalMaximum := true
@@ -160,7 +166,7 @@ func ExtractPeaks(spectrogram [][]complex128) []Peak {
 				}
 			}
 		}
-
+ 
 		// --- Limit and Sort Peaks Per Frame ---
 		// If more peaks are found than maxPeaksPerFrame, sort by magnitude and take the top N
 		if len(currentFramePeaks) > maxPeaksPerFrame {
@@ -177,6 +183,7 @@ func ExtractPeaks(spectrogram [][]complex128) []Peak {
 	}
 
 	return peaks
+ 
 }
 
 func FindPeakRelationships(peaks []Peak, songID string) []db.Fingerprint {
@@ -185,28 +192,31 @@ func FindPeakRelationships(peaks []Peak, songID string) []db.Fingerprint {
 	}
 
 	fingerprints := []db.Fingerprint{}
-
+ 
 	for i, anchor := range peaks {
 
 		targetZoneMinTime := anchor.Time
 		targetZoneMaxTime := anchor.Time + TARGET_ZONE_DT_MAX_SECONDS
 		targetZoneMinFreq := anchor.Frequency - TARGET_ZONE_FREQ_BAND_HZ
 		targetZoneMaxFreq := anchor.Frequency + TARGET_ZONE_FREQ_BAND_HZ
+ 
 
 		potentialTargets := []Peak{}
 		for j := i + 1; j < len(peaks); j++ {
 			target := peaks[j]
 
+ 
 			if target.Time >= targetZoneMinTime && target.Time <= targetZoneMaxTime &&
 				target.Frequency >= targetZoneMinFreq && target.Frequency <= targetZoneMaxFreq {
 				potentialTargets = append(potentialTargets, target)
 			}
 
 			if target.Time > targetZoneMaxTime {
+ 
 				break
 			}
 		}
-
+ 
 		numTargetsToConsider := int(math.Min(float64(len(potentialTargets)), float64(FAN_OUT)))
 
 		for k := 0; k < numTargetsToConsider; k++ {
@@ -240,6 +250,7 @@ func FindPeakRelationships(peaks []Peak, songID string) []db.Fingerprint {
 				SongID:     songID,
 				Hash:       address,
 				AnchorTime: anchor.Time,
+ 
 			}
 			fingerprints = append(fingerprints, fingerprint)
 		}

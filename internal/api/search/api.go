@@ -11,8 +11,10 @@ import (
 	"sort"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-audio/wav"
 	"gorm.io/gorm"
 )
+
 
 type MatchedSongOptimized struct {
 	SongID string
@@ -20,12 +22,20 @@ type MatchedSongOptimized struct {
 	Offset float64
 }
 
+
 const (
 	MIN_MATCH_THRESHOLD = 5
+	OFFSET_BIN_SIZE_MS  = 32
+	TOP_N_RESULTS       = 3
 
-	OFFSET_BIN_SIZE_MS = 32
+	// New constants for secondary validation tolerances
+	// FreqTolerance: Max allowed difference in Hz for AnchorFreq and TargetFreq
+	// Example: Allowing up to 2 Hz difference.
+	FREQ_TOLERANCE = 2.0 // Hz
 
-	TOP_N_RESULTS = 3
+	// TimeDeltaTolerance: Max allowed difference in seconds for TimeDelta
+	// Example: Allowing up to 20 milliseconds (0.02 seconds) difference.
+	TIME_DELTA_TOLERANCE = 0.02 // Seconds (equivalent to 20ms)
 )
 
 func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSongOptimized, error) {
@@ -51,6 +61,7 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 	if err := DB.Where("hash IN ? and song_id IN (?)", hashes, subQuery).
 		Find(&matchedFingerprints).Error; err != nil {
 		return nil, fmt.Errorf("failed DB query: %w", err)
+
 	}
 	fmt.Println("LENGTH OF MATCHED FINGERPRINTS", len(matchedFingerprints))
 	matches := make(map[string][][2]uint32)
@@ -84,6 +95,7 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 			SongID: songID,
 			Offset: timestamps[songID],
 			Score:  score,
+
 		}
 		result = append(result, match)
 	}
@@ -110,6 +122,7 @@ func analyzeRelativeTiming(matches map[string][][2]uint32) map[string]float64 {
 				if math.Abs(sampleDiff-dbDiff) < 50 {
 					count++
 				}
+
 			}
 		}
 		scores[songID] = float64(count)
@@ -163,6 +176,7 @@ func RecogniseSong(c *gin.Context) {
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
+
 	}
 	file2, err := os.Open("temp.wav")
 	if err != nil {
