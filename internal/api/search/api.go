@@ -11,17 +11,14 @@ import (
 	"sort"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-audio/wav"
 	"gorm.io/gorm"
 )
-
 
 type MatchedSongOptimized struct {
 	SongID string
 	Score  float64
 	Offset float64
 }
-
 
 const (
 	MIN_MATCH_THRESHOLD = 5
@@ -95,7 +92,6 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 			SongID: songID,
 			Offset: timestamps[songID],
 			Score:  score,
-
 		}
 		result = append(result, match)
 	}
