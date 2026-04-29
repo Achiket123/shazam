@@ -1,259 +1,253 @@
 package fingerprint
 
 import (
- 
- 
 	"math"
-	"math/cmplx"
 	"shazam/internal/db"
 	"sort"
 )
 
-const ( 
-	FAN_OUT = 5
- 
+const (
+	FAN_OUT = 15 // more pairings per anchor = more fingerprints = better recall under noise
 
+	// Target zone for pairing: anchor peak searches forward in time within this window
 	TARGET_ZONE_DT_MAX_SECONDS = 2.0
-	TARGET_ZONE_FREQ_BAND_HZ   = 300.0
 
-	// Ensure SampleRate, WindowSize, HopSize are defined and accessible.
-	// Example values:
- 
-	// FREQ_BIN_RESOLUTION should be consistent with SampleRate and WindowSize
-	FREQ_BIN_RESOLUTION = float64(SampleRate) / float64(WindowSize)
+	// How many top peaks to keep per band per frame
+	MAX_PEAKS_PER_BAND = 3
+
+	// Z-score threshold — peaks must stand out from their local neighbourhood by this much.
+	// Per-band extraction means we can be more selective (higher threshold) without
+	// suppressing musically important peaks in quieter bands.
+	Z_SCORE_THRESHOLD = 2.5
+
+	// Neighbourhood radius (frames × bins) used when computing the local mean/std
+	// for Z-score. Kept small so computation stays manageable.
+	Z_NEIGHBORHOOD = 7
+
+	// Minimum time gap between anchor and target peaks.
+	// Pairs that are too close in time tend to come from the same transient and
+	// add noise without improving discriminability.
+	MIN_DELTA_T = 0.05 // seconds
 )
 
+// Peak represents a spectral peak: a point in time-frequency space with high local energy.
 type Peak struct {
 	Time      float64
 	Frequency float64
 	Magnitude float64
 }
 
-// Assumed helper functions (from your previous code)
-func meanStd(data []float64) (float64, float64) {
-	if len(data) == 0 {
-		return 0, 0
-	}
-	sum := 0.0
-	for _, v := range data {
-		sum += v
-	}
-	mean := sum / float64(len(data))
-
-	sumSqDiff := 0.0
-	for _, v := range data {
-		sumSqDiff += (v - mean) * (v - mean)
-	}
-	std := math.Sqrt(sumSqDiff / float64(len(data)))
-	return mean, std
-}
-
-func getMagnitudes(spectrogram [][]complex128) [][]float64 {
-	numFrames := len(spectrogram)
-	if numFrames == 0 {
-		return [][]float64{}
-	}
-	numBins := len(spectrogram[0])
-	magnitudes := make([][]float64, numFrames)
-	for t := 0; t < numFrames; t++ {
-		magnitudes[t] = make([]float64, numBins)
-		for f := 0; f < numBins; f++ {
-			mags := cmplx.Abs(spectrogram[t][f]) // Use cmplx.Abs if available, or .Abs() if complex128 has it
-			if mags == 0 {
-				magnitudes[t][f] = -120.0 // dB floor for silence
-			} else {
-				magnitudes[t][f] = 20 * math.Log10(mags)
- 
-			}
-		}
-	}
-	return magnitudes
-}
- 
-func calculateFrequencyFromBin(binIndex int) float64 {
-	return float64(binIndex) * (float64(SampleRate) / float64(WindowSize))
-}
-
-// ExtractPeaks identifies significant peaks from the spectrogram.
-// It has been adjusted to potentially yield more fingerprints.
+// ExtractPeaks finds perceptually significant peaks across all frequency bands.
+//
+// Key improvements over a naive global approach:
+//  1. The spectrogram is split into log-spaced frequency bands (see FreqBands in fingerprinting.go).
+//     This prevents loud low-frequency content (bass, kick drum) from suppressing peaks in
+//     quieter but harmonically important high-frequency bands.
+//  2. Local maximum detection uses a 3×3 neighbourhood (time × freq) inside each band.
+//  3. Z-score thresholding is computed within the band, not globally, so the threshold
+//     adapts to the local noise floor of each frequency region.
+//  4. Only the top MAX_PEAKS_PER_BAND peaks (by magnitude) are kept per band per frame,
+//     bounding the total fingerprint count while maximising quality.
 func ExtractPeaks(spectrogram [][]complex128) []Peak {
-	if len(spectrogram) < 1 || len(spectrogram[0]) < 1 {
-		return []Peak{}
+	if len(spectrogram) == 0 || len(spectrogram[0]) == 0 {
+		return nil
 	}
 
-	magnitudes := getMagnitudes(spectrogram)
+	magnitudes := getMagnitudesDB(spectrogram)
 	numFrames := len(magnitudes)
 	numBins := len(magnitudes[0])
-	peaks := []Peak{}
- 
 
-	// Neighborhood size for local maximum check (5x5 grid)
-	neighborhoodSizeTime := 2 // +/- 2 frames
-	neighborhoodSizeFreq := 2 // +/- 2 frequency bins
- 
-	// Adjusted Z-score threshold to be less strict
-	// Lowering this value will increase the number of peaks detected.
-	zScoreThreshold := 1.8 // Changed from 3.0 to 1.8 (experiment with this value)
+	var allPeaks []Peak
 
-	// Adjusted max peaks per frame to allow more peaks
-	// Increasing this value will increase the number of fingerprints.
-	maxPeaksPerFrame := 20 // Changed from 10 to 20 (experiment with this value)
-
-	// Z-score comparison neighborhood size (21x21 window for background contrast)
-	// Consider if this fixed size is appropriate for all frequency ranges.
-	zScoreComparisonWindow := 10 // +/- 10 frames/bins
-
-	for i := 0; i < numFrames; i++ {
-		currentFramePeaks := []Peak{}
-		for j := 0; j < numBins; j++ {
-			currentMagnitude := magnitudes[i][j]
-
-			// Skip very low magnitude points, as they are likely noise or silence
-			if currentMagnitude <= -100.0 { // -100 dB is a common low-energy threshold
-				continue
-			}
-
-
-			// --- Local Maximum Check ---
-			isLocalMaximum := true
-			for di := -neighborhoodSizeTime; di <= neighborhoodSizeTime; di++ {
-				for dj := -neighborhoodSizeFreq; dj <= neighborhoodSizeFreq; dj++ {
-					ni, nj := i+di, j+dj
-
-					// Ensure neighborhood indices are within bounds and not the current point itself
-					if ni >= 0 && ni < numFrames && nj >= 0 && nj < numBins && (di != 0 || dj != 0) {
-						if magnitudes[ni][nj] > currentMagnitude {
-							isLocalMaximum = false
-							break
-						}
-					}
-				}
-				if !isLocalMaximum {
-					break
-				}
-			}
-
-			if isLocalMaximum {
-				// --- Z-score Calculation for Contrastive Peaks ---
-				zScoreNeighborhood := []float64{}
-				// Collect magnitudes from the larger comparison window
-				for di := -zScoreComparisonWindow; di <= zScoreComparisonWindow; di++ {
-					for dj := -zScoreComparisonWindow; dj <= zScoreComparisonWindow; dj++ {
-						ni, nj := i+di, j+dj
-						if ni >= 0 && ni < numFrames && nj >= 0 && nj < numBins {
-							// Optionally, exclude the current peak itself from the Z-score mean/std calculation
-							// if (di != 0 || dj != 0) { ... }
-							zScoreNeighborhood = append(zScoreNeighborhood, magnitudes[ni][nj])
-						}
-					}
-				}
-
-				mean, std := meanStd(zScoreNeighborhood)
-				if std == 0 { // Avoid division by zero if all values in neighborhood are the same
-					continue
-				}
-				zScore := (currentMagnitude - mean) / std
-
-				// If the peak's Z-score meets the threshold, add it
-				if zScore >= zScoreThreshold {
-					peakTime := float64(i*HopSize) / float64(SampleRate)
-					peakFrequency := calculateFrequencyFromBin(j)
-					currentFramePeaks = append(currentFramePeaks, Peak{
-						Time:      peakTime,
-						Frequency: peakFrequency,
-						Magnitude: currentMagnitude,
-					})
-				}
-			}
+	for _, band := range FreqBands {
+		minBin := freqToBin(band.MinHz)
+		maxBin := freqToBin(band.MaxHz)
+		if maxBin >= numBins {
+			maxBin = numBins - 1
 		}
- 
-		// --- Limit and Sort Peaks Per Frame ---
-		// If more peaks are found than maxPeaksPerFrame, sort by magnitude and take the top N
-		if len(currentFramePeaks) > maxPeaksPerFrame {
-			// Sort peaks in the current frame by Magnitude in descending order
-			sort.Slice(currentFramePeaks, func(a, b int) bool {
-				return currentFramePeaks[a].Magnitude > currentFramePeaks[b].Magnitude
-			})
-			// Append only the top 'maxPeaksPerFrame' peaks
-			peaks = append(peaks, currentFramePeaks[:maxPeaksPerFrame]...)
-		} else {
-			// Append all found peaks if they are within the limit
-			peaks = append(peaks, currentFramePeaks...)
+		if minBin >= maxBin {
+			continue
+		}
+
+		for i := 0; i < numFrames; i++ {
+			framePeaks := extractBandPeaks(magnitudes, i, minBin, maxBin, numFrames, numBins)
+			allPeaks = append(allPeaks, framePeaks...)
 		}
 	}
 
-	return peaks
- 
+	return allPeaks
 }
 
+// extractBandPeaks finds the best peaks within a single frequency band for one frame.
+func extractBandPeaks(
+	magnitudes [][]float64,
+	frame, minBin, maxBin, numFrames, numBins int,
+) []Peak {
+	type candidate struct {
+		bin int
+		mag float64
+	}
+	var candidates []candidate
+
+	for j := minBin; j <= maxBin; j++ {
+		mag := magnitudes[frame][j]
+		if mag <= -90.0 {
+			continue // silence / below noise floor
+		}
+
+		// --- 3×3 local maximum check ---
+		if !isLocalMax(magnitudes, frame, j, 1, 1, numFrames, numBins) {
+			continue
+		}
+
+		// --- Z-score within neighbourhood ---
+		zScore := computeZScore(magnitudes, frame, j, Z_NEIGHBORHOOD, numFrames, numBins)
+		if zScore < Z_SCORE_THRESHOLD {
+			continue
+		}
+
+		candidates = append(candidates, candidate{j, mag})
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Keep only the strongest MAX_PEAKS_PER_BAND candidates
+	sort.Slice(candidates, func(a, b int) bool {
+		return candidates[a].mag > candidates[b].mag
+	})
+	if len(candidates) > MAX_PEAKS_PER_BAND {
+		candidates = candidates[:MAX_PEAKS_PER_BAND]
+	}
+
+	peaks := make([]Peak, 0, len(candidates))
+	for _, c := range candidates {
+		peaks = append(peaks, Peak{
+			Time:      float64(frame*HopSize) / float64(SampleRate),
+			Frequency: binToFreq(c.bin),
+			Magnitude: c.mag,
+		})
+	}
+	return peaks
+}
+
+// isLocalMax returns true if magnitudes[t][f] is greater than all neighbours
+// within ±dt frames and ±df bins.
+func isLocalMax(mag [][]float64, t, f, dt, df, numFrames, numBins int) bool {
+	cur := mag[t][f]
+	for di := -dt; di <= dt; di++ {
+		for dj := -df; dj <= df; dj++ {
+			if di == 0 && dj == 0 {
+				continue
+			}
+			ni, nj := t+di, f+dj
+			if ni >= 0 && ni < numFrames && nj >= 0 && nj < numBins {
+				if mag[ni][nj] >= cur {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// computeZScore measures how much the peak at (t,f) stands out from its
+// local neighbourhood (radius r in both time and frequency dimensions).
+func computeZScore(mag [][]float64, t, f, r, numFrames, numBins int) float64 {
+	var vals []float64
+	for di := -r; di <= r; di++ {
+		for dj := -r; dj <= r; dj++ {
+			ni, nj := t+di, f+dj
+			if ni >= 0 && ni < numFrames && nj >= 0 && nj < numBins {
+				vals = append(vals, mag[ni][nj])
+			}
+		}
+	}
+	if len(vals) == 0 {
+		return 0
+	}
+
+	sum := 0.0
+	for _, v := range vals {
+		sum += v
+	}
+	mean := sum / float64(len(vals))
+
+	sumSq := 0.0
+	for _, v := range vals {
+		d := v - mean
+		sumSq += d * d
+	}
+	std := math.Sqrt(sumSq / float64(len(vals)))
+	if std == 0 {
+		return 0
+	}
+	return (mag[t][f] - mean) / std
+}
+
+// FindPeakRelationships pairs each anchor peak with up to FAN_OUT target peaks
+// that fall within the target zone (time window + same frequency band tolerance).
+//
+// The hash packs (anchorFreqBin, targetFreqBin, deltaMs) into a uint64.
+// Bit layout:  anchorFreq[10] | targetFreq[10] | deltaMs[20]  (40 bits used)
+// This gives:
+//   - freq resolution: ~7.8 Hz / bin at 8 kHz with 1024-bin FFT
+//   - deltaT resolution: 1 ms, max 1048 seconds (well beyond TARGET_ZONE_DT_MAX_SECONDS)
 func FindPeakRelationships(peaks []Peak, songID string) []db.Fingerprint {
 	if len(peaks) == 0 {
 		return nil
 	}
 
-	fingerprints := []db.Fingerprint{}
- 
+	// Must be sorted by time so the early-exit break in the inner loop is valid
+	sort.Slice(peaks, func(i, j int) bool {
+		return peaks[i].Time < peaks[j].Time
+	})
+
+	const (
+		FREQ_BITS    = 10
+		DELTA_T_BITS = 20
+	)
+	freqBinRes := float64(SampleRate) / float64(WindowSize)
+
+	fingerprints := make([]db.Fingerprint, 0, len(peaks)*FAN_OUT)
+
 	for i, anchor := range peaks {
+		maxTime := anchor.Time + TARGET_ZONE_DT_MAX_SECONDS
+		fansFound := 0
 
-		targetZoneMinTime := anchor.Time
-		targetZoneMaxTime := anchor.Time + TARGET_ZONE_DT_MAX_SECONDS
-		targetZoneMinFreq := anchor.Frequency - TARGET_ZONE_FREQ_BAND_HZ
-		targetZoneMaxFreq := anchor.Frequency + TARGET_ZONE_FREQ_BAND_HZ
- 
-
-		potentialTargets := []Peak{}
-		for j := i + 1; j < len(peaks); j++ {
+		for j := i + 1; j < len(peaks) && fansFound < FAN_OUT; j++ {
 			target := peaks[j]
 
- 
-			if target.Time >= targetZoneMinTime && target.Time <= targetZoneMaxTime &&
-				target.Frequency >= targetZoneMinFreq && target.Frequency <= targetZoneMaxFreq {
-				potentialTargets = append(potentialTargets, target)
+			if target.Time > maxTime {
+				break // peaks are sorted — nothing later can match
 			}
-
-			if target.Time > targetZoneMaxTime {
- 
-				break
-			}
-		}
- 
-		numTargetsToConsider := int(math.Min(float64(len(potentialTargets)), float64(FAN_OUT)))
-
-		for k := 0; k < numTargetsToConsider; k++ {
-			target := potentialTargets[k]
 
 			deltaT := target.Time - anchor.Time
-
-			if deltaT <= 0 {
-				continue
+			if deltaT < MIN_DELTA_T {
+				continue // too close in time — likely same transient
 			}
 
-			anchorFreqBin := int(anchor.Frequency / FREQ_BIN_RESOLUTION)
-			targetFreqBin := int(target.Frequency / FREQ_BIN_RESOLUTION)
+			anchorBin := uint64(math.Round(anchor.Frequency / freqBinRes))
+			targetBin := uint64(math.Round(target.Frequency / freqBinRes))
+			deltaMs := uint64(math.Round(deltaT * 1000))
 
-			deltaMs := uint32(math.Round(deltaT * 1000))
+			maskedAnchor := anchorBin & ((1 << FREQ_BITS) - 1)
+			maskedTarget := targetBin & ((1 << FREQ_BITS) - 1)
+			maskedDelta := deltaMs & ((1 << DELTA_T_BITS) - 1)
 
-			const (
-				FREQ_BITS    = 9
-				DELTA_T_BITS = 14
-			)
+			hash := (maskedAnchor << (FREQ_BITS + DELTA_T_BITS)) |
+				(maskedTarget << DELTA_T_BITS) |
+				maskedDelta
 
-			maskedAnchorFreq := uint32(anchorFreqBin) & ((1 << FREQ_BITS) - 1)
-			maskedTargetFreq := uint32(targetFreqBin) & ((1 << FREQ_BITS) - 1)
-			maskedDeltaMs := deltaMs & ((1 << DELTA_T_BITS) - 1)
-
-			address := (maskedAnchorFreq << (FREQ_BITS + DELTA_T_BITS)) |
-				(maskedTargetFreq << DELTA_T_BITS) |
-				maskedDeltaMs
-
-			fingerprint := db.Fingerprint{
+			fingerprints = append(fingerprints, db.Fingerprint{
 				SongID:     songID,
-				Hash:       address,
+				Hash:       hash,
 				AnchorTime: anchor.Time,
- 
-			}
-			fingerprints = append(fingerprints, fingerprint)
+			})
+			fansFound++
 		}
 	}
+
 	return fingerprints
 }

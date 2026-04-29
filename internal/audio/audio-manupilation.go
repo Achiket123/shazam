@@ -12,124 +12,143 @@ import (
 	go_mp3 "github.com/hajimehoshi/go-mp3"
 )
 
-// DownSamplingAudio converts any supported input audio file to WAV format with 44100Hz, 16-bit, mono.
-
-func DownSamplingAudio(file io.ReadSeeker, fileName string) (*[]float64, error) { // Changed return type
-	splitName := strings.Split(fileName, ".")
-	format := splitName[len(splitName)-1]
-	fmt.Println(format)
+// DownSamplingAudio decodes any supported audio format to mono float64 PCM
+// at fingerprint.SampleRate (8 kHz), ready for fingerprinting.
+//
+// Processing chain:
+//   format decode → stereo-to-mono mix → lowpass anti-aliasing → downsample
+//
+// The lowpass cutoff is set to Nyquist/2 of the TARGET rate (4 kHz → 3.8 kHz)
+// rather than the source rate, ensuring no aliasing after downsampling.
+func DownSamplingAudio(file io.ReadSeeker, fileName string) (*[]float64, error) {
+	parts := strings.Split(fileName, ".")
+	format := strings.ToLower(parts[len(parts)-1])
 
 	var pcmSamples []float64
 	var originalSampleRate int
 
-	if format == "wav" {
-		fmt.Println("wav")
-		decoder := wav.NewDecoder(file)
-		if !decoder.IsValidFile() {
-			return nil, fmt.Errorf("invalid WAV file")
-		}
-		err := decoder.FwdToPCM()
+	switch format {
+	case "wav":
+		var err error
+		pcmSamples, originalSampleRate, err = decodeWAV(file)
 		if err != nil {
 			return nil, err
 		}
-		// Read all PCM data into an IntBuffer
-		buf := audio.IntBuffer{
-			Format: &audio.Format{
-				NumChannels: int(decoder.NumChans),
-				SampleRate:  int(decoder.SampleRate)},
-			Data: make([]int, decoder.PCMLen()),
-		}
-		if _, err := decoder.PCMBuffer(&buf); err != nil { // Reads all PCM data
-			return nil, fmt.Errorf("failed to decode WAV to PCM: %w", err)
-		}
 
-		originalSampleRate = buf.Format.SampleRate
-
-		// Convert to mono if necessary and then to float64
-		if buf.Format.NumChannels > 1 {
-			monoData := make([]int, len(buf.Data)/buf.Format.NumChannels)
-			for i := 0; i < len(monoData); i++ {
-				sum := 0
-				for c := 0; c < buf.Format.NumChannels; c++ {
-					sum += buf.Data[i*buf.Format.NumChannels+c]
-				}
-				monoData[i] = sum / buf.Format.NumChannels
-			}
-			pcmSamples = make([]float64, len(monoData))
-			for i, v := range monoData {
-				pcmSamples[i] = float64(v)
-			}
-		} else {
-			lpData := fingerprint.LowpassFilter(buf.AsFloatBuffer().Data, 5512.5, float64(decoder.SampleRate))
-			pcmSamples = lpData // Already mono, convert to float64
-		}
-
-	} else if format == "mp3" { // Changed 'else' to 'else if' for clarity
-		decoder, err := go_mp3.NewDecoder(file) // Check for error here
+	case "mp3":
+		var err error
+		pcmSamples, originalSampleRate, err = decodeMP3(file)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create MP3 decoder: %w", err)
+			return nil, err
 		}
 
-		originalSampleRate = decoder.SampleRate()
-
-		// Use a buffer for decoding MP3 directly into float64 or int samples
-		// The go-mp3 decoder typically decodes to 16-bit PCM.
-		// You might need to adapt this part based on how go-mp3 provides its output.
-		// A common pattern is to read into a byte slice and then convert to audio samples.
-
-		var rawPCMBytes []byte       // Stores decoded 16-bit PCM bytes
-		tmpBuf := make([]byte, 4096) // Small buffer for reading
-		for {
-			n, err := decoder.Read(tmpBuf) // Read into byte buffer
-			if err != nil && err != io.EOF {
-				return nil, fmt.Errorf("error reading MP3: %w", err)
-			}
-			if n == 0 && err == io.EOF {
-				break
-			}
-			rawPCMBytes = append(rawPCMBytes, tmpBuf[:n]...)
-		}
-
-		// Convert rawPCMBytes (interleaved 16-bit) to mono float64 samples
-		// Assuming 16-bit signed little-endian PCM from go-mp3
-		pcmSamples = make([]float64, 0, len(rawPCMBytes)/2) // Pre-allocate assuming mono
-		for i := 0; i < len(rawPCMBytes); i += 4 {          // For stereo 16-bit: 4 bytes per frame (2 channels * 2 bytes/sample)
-			// Read 1st channel sample
-			sample1 := float64(int16(rawPCMBytes[i]) | int16(rawPCMBytes[i+1])<<8)
-			// Read 2nd channel sample
-			sample2 := float64(int16(rawPCMBytes[i+2]) | int16(rawPCMBytes[i+3])<<8)
-
-			// Average for mono
-			pcmSamples = append(pcmSamples, (sample1+sample2)/2.0)
-		}
-		lpData := fingerprint.LowpassFilter(pcmSamples, 5512.5, float64(decoder.SampleRate()))
-		pcmSamples = lpData
-
-	} else {
+	default:
 		return nil, fmt.Errorf("unsupported audio format: %s", format)
 	}
 
-	downSampled := DownSampling(pcmSamples, originalSampleRate, fingerprint.SampleRate)
+	// Anti-aliasing lowpass before downsampling.
+	// Cutoff = 0.95 × Nyquist of target rate to leave a small guard band.
+	targetNyquist := float64(fingerprint.SampleRate) / 2.0
+	cutoff := targetNyquist * 0.95
+	filtered := fingerprint.LowpassFilter(pcmSamples, cutoff, float64(originalSampleRate))
 
+	downSampled := downsample(filtered, originalSampleRate, fingerprint.SampleRate)
 	return &downSampled, nil
 }
-func DownSampling(pcm []float64, sampleRate int, targetSampleRate int) []float64 {
-	if targetSampleRate >= sampleRate || targetSampleRate <= 0 {
-		return pcm
+
+func decodeWAV(file io.ReadSeeker) ([]float64, int, error) {
+	decoder := wav.NewDecoder(file)
+	if !decoder.IsValidFile() {
+		return nil, 0, fmt.Errorf("invalid WAV file")
+	}
+	if err := decoder.FwdToPCM(); err != nil {
+		return nil, 0, err
 	}
 
-	sampleRateFactor := float64(sampleRate) / float64(targetSampleRate)
-	newLength := int(float64(len(pcm)) / sampleRateFactor)
+	buf := audio.IntBuffer{
+		Format: &audio.Format{
+			NumChannels: int(decoder.NumChans),
+			SampleRate:  int(decoder.SampleRate),
+		},
+		Data: make([]int, decoder.PCMLen()),
+	}
+	if _, err := decoder.PCMBuffer(&buf); err != nil {
+		return nil, 0, fmt.Errorf("failed to decode WAV PCM: %w", err)
+	}
 
-	downsampled := make([]float64, 0, newLength)
+	sampleRate := buf.Format.SampleRate
+	numCh := buf.Format.NumChannels
+	samples := monoMixInt(buf.Data, numCh)
+	return samples, sampleRate, nil
+}
 
-	for i := 0; i < newLength; i++ {
-		// Use round to reduce jitter
-		originalIndex := int(math.Round(float64(i) * sampleRateFactor))
-		if originalIndex < len(pcm) {
-			downsampled = append(downsampled, pcm[originalIndex])
+func decodeMP3(file io.ReadSeeker) ([]float64, int, error) {
+	decoder, err := go_mp3.NewDecoder(file)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create MP3 decoder: %w", err)
+	}
+
+	var rawBytes []byte
+	buf := make([]byte, 8192)
+	for {
+		n, err := decoder.Read(buf)
+		if n > 0 {
+			rawBytes = append(rawBytes, buf[:n]...)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, 0, fmt.Errorf("MP3 read error: %w", err)
 		}
 	}
 
-	return downsampled
+	// go-mp3 always outputs stereo 16-bit LE PCM
+	samples := make([]float64, 0, len(rawBytes)/4)
+	for i := 0; i+3 < len(rawBytes); i += 4 {
+		l := float64(int16(uint16(rawBytes[i]) | uint16(rawBytes[i+1])<<8))
+		r := float64(int16(uint16(rawBytes[i+2]) | uint16(rawBytes[i+3])<<8))
+		samples = append(samples, (l+r)/2.0)
+	}
+
+	return samples, decoder.SampleRate(), nil
+}
+
+// monoMixInt averages numChannels interleaved int samples into a single mono float64 channel.
+func monoMixInt(data []int, numChannels int) []float64 {
+	if numChannels == 1 {
+		out := make([]float64, len(data))
+		for i, v := range data {
+			out[i] = float64(v)
+		}
+		return out
+	}
+	frames := len(data) / numChannels
+	out := make([]float64, frames)
+	for i := 0; i < frames; i++ {
+		sum := 0
+		for c := 0; c < numChannels; c++ {
+			sum += data[i*numChannels+c]
+		}
+		out[i] = float64(sum) / float64(numChannels)
+	}
+	return out
+}
+
+// downsample reduces the sample rate by simple nearest-neighbour resampling.
+// The caller must apply a lowpass filter first to avoid aliasing.
+func downsample(pcm []float64, fromRate, toRate int) []float64 {
+	if toRate >= fromRate || toRate <= 0 {
+		return pcm
+	}
+	factor := float64(fromRate) / float64(toRate)
+	newLen := int(float64(len(pcm)) / factor)
+	out := make([]float64, 0, newLen)
+	for i := 0; i < newLen; i++ {
+		idx := int(math.Round(float64(i) * factor))
+		if idx < len(pcm) {
+			out = append(out, pcm[idx])
+		}
+	}
+	return out
 }

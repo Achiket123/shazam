@@ -1,131 +1,74 @@
 package fingerprint
 
 import (
-	"image"
-	"image/color"
-	"image/png"
 	"math"
 	"math/cmplx"
-	"os"
 )
 
+// Spectrogram computes a short-time Fourier transform (STFT) of the input signal.
+// Returns only the positive-frequency bins (first WindowSize/2+1 bins).
 func Spectrogram(data []float64) [][]complex128 {
 	spectrogram := make([][]complex128, 0)
-	Length := len(data)
-	for start := 0; start+WindowSize <= Length; start += HopSize {
+	length := len(data)
+	numBins := WindowSize/2 + 1 // only positive frequencies
 
+	for start := 0; start+WindowSize <= length; start += HopSize {
 		frame := data[start : start+WindowSize]
-		window := ApplyHanningWindow(frame)
-
-		spectrum := FFT(window)
-
-		spectrogram = append(spectrogram, spectrum[:HopSize])
+		windowed := applyHanningWindow(frame)
+		spectrum := FFT(windowed)
+		// Keep only positive-frequency bins
+		bin := make([]complex128, numBins)
+		copy(bin, spectrum[:numBins])
+		spectrogram = append(spectrogram, bin)
 	}
 
 	return spectrogram
 }
 
-func ApplyHanningWindow(frame []float64) []complex128 {
+// applyHanningWindow applies a Hann window to reduce spectral leakage.
+func applyHanningWindow(frame []float64) []complex128 {
 	N := len(frame)
 	windowed := make([]complex128, N)
 	for i := 0; i < N; i++ {
-		windowed[i] = complex(frame[i]*0.5*(1-math.Cos(2*math.Pi*float64(i)/float64(N-1))), 0)
+		w := 0.5 * (1 - math.Cos(2*math.Pi*float64(i)/float64(N-1)))
+		windowed[i] = complex(frame[i]*w, 0)
 	}
 	return windowed
 }
-func createSpectrogramImage(spectrogram [][]complex128) image.Image {
-	if len(spectrogram) == 0 {
-		return image.NewRGBA(image.Rect(0, 0, 0, 0))
-	}
 
+// getMagnitudesDB converts complex spectrogram to dB-scale magnitudes.
+func getMagnitudesDB(spectrogram [][]complex128) [][]float64 {
 	numFrames := len(spectrogram)
-	numBins := len(spectrogram[0])
-
-	// --- Step 1: Calculate optimal width and height for 16:9 aspect ---
-	scaleFactor := 4 // Increase this for higher resolution
-	width := numFrames * scaleFactor
-	height := (width * 9) / 16 // Maintain 16:9 aspect ratio
-
-	if height > numBins*scaleFactor {
-		height = numBins * scaleFactor
-		width = (height * 16) / 9
+	if numFrames == 0 {
+		return nil
 	}
-
-	// --- Step 2: Prepare magnitude data ---
+	numBins := len(spectrogram[0])
 	magnitudes := make([][]float64, numFrames)
-	maxMagnitude := -1e9
-
-	for i, frame := range spectrogram {
-		magnitudes[i] = make([]float64, numBins)
-		for j, c := range frame {
-			mag := cmplx.Abs(c)
-			db := 20 * math.Log10(mag+1e-9)
-			magnitudes[i][j] = db
-			if db > maxMagnitude {
-				maxMagnitude = db
+	for t := 0; t < numFrames; t++ {
+		magnitudes[t] = make([]float64, numBins)
+		for f := 0; f < numBins; f++ {
+			mag := cmplx.Abs(spectrogram[t][f])
+			if mag < 1e-10 {
+				magnitudes[t][f] = -100.0
+			} else {
+				magnitudes[t][f] = 20 * math.Log10(mag)
 			}
 		}
 	}
-	minDB := maxMagnitude - 80.0
-
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-
-	for x := 0; x < width; x++ {
-		spectroX := (x * numFrames) / width
-		for y := 0; y < height; y++ {
-			spectroY := (y * numBins) / height
-			val := (magnitudes[spectroX][spectroY] - minDB) / (maxMagnitude - minDB)
-			val = math.Max(0.0, math.Min(1.0, val))
-			c := MapToColor(val)
-
-			img.Set(x, height-1-y, c) // Flip vertically
-		}
-	}
-
-	// --- Step 4: Save image ---
-	file, err := os.Create("spectrogram_hd.png")
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
-	png.Encode(file, img)
-
-	return img
+	return magnitudes
 }
 
-func MapToColor(val float64) color.Color {
-
-	if val < 0 {
-		val = 0
+// freqToBin converts a frequency in Hz to the nearest FFT bin index.
+func freqToBin(hz float64) int {
+	bin := int(math.Round(hz * float64(WindowSize) / float64(SampleRate)))
+	maxBin := WindowSize / 2
+	if bin > maxBin {
+		return maxBin
 	}
-	if val > 1 {
-		val = 1
-	}
+	return bin
+}
 
-	var r, g, b uint8
-
-	switch {
-	case val < 0.25:
-
-		r = 0
-		g = uint8(255 * (val / 0.25))
-		b = 255
-	case val < 0.5:
-
-		r = 0
-		g = 255
-		b = uint8(255 * (1 - ((val - 0.25) / 0.25)))
-	case val < 0.75:
-
-		r = uint8(255 * ((val - 0.5) / 0.25))
-		g = 255
-		b = 0
-	default:
-
-		r = 255
-		g = uint8(255 * (1 - ((val - 0.75) / 0.25)))
-		b = 0
-	}
-
-	return color.RGBA{R: r, G: g, B: b, A: 255}
+// binToFreq converts an FFT bin index to its centre frequency in Hz.
+func binToFreq(bin int) float64 {
+	return float64(bin) * float64(SampleRate) / float64(WindowSize)
 }

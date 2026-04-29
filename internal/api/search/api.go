@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"runtime"
 	"shazam/internal/audio"
 	"shazam/internal/db"
 	"shazam/internal/fingerprint"
@@ -14,181 +13,207 @@ import (
 	"gorm.io/gorm"
 )
 
-type MatchedSongOptimized struct {
-	SongID string
-	Score  float64
-	Offset float64
+// MatchedSong is the result returned to the client for each candidate match.
+type MatchedSong struct {
+	SongID     string  `json:"song_id"`
+	Score      float64 `json:"score"`
+	Offset     float64 `json:"offset_seconds"`
+	Confidence string  `json:"confidence"` // "high" | "medium" | "low"
 }
 
 const (
-	MIN_MATCH_THRESHOLD = 5
-	OFFSET_BIN_SIZE_MS  = 32
-	TOP_N_RESULTS       = 3
+	// Minimum number of hash matches for a candidate to be considered at all.
+	MIN_HASH_MATCHES = 5
 
-	// New constants for secondary validation tolerances
-	// FreqTolerance: Max allowed difference in Hz for AnchorFreq and TargetFreq
-	// Example: Allowing up to 2 Hz difference.
-	FREQ_TOLERANCE = 2.0 // Hz
+	// Offset histogram bin size in milliseconds.
+	// Matches within the same bin are considered temporally coherent.
+	// 20ms is tight enough to reject coincidental matches, loose enough to
+	// tolerate minor timing jitter from recording latency or resampling.
+	OFFSET_BIN_MS = 20
 
-	// TimeDeltaTolerance: Max allowed difference in seconds for TimeDelta
-	// Example: Allowing up to 20 milliseconds (0.02 seconds) difference.
-	TIME_DELTA_TOLERANCE = 0.02 // Seconds (equivalent to 20ms)
+	// A candidate must have at least this fraction of matches in its best
+	// offset bin to be returned. Filters out songs with scattered (random) matches.
+	MIN_COHERENCE_RATIO = 0.05
+
+	TOP_N_RESULTS = 5
+
+	// Score thresholds for the confidence label
+	HIGH_CONFIDENCE_SCORE   = 25
+	MEDIUM_CONFIDENCE_SCORE = 10
 )
 
-func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSongOptimized, error) {
-
+// MatchHashes is the core recognition function.
+//
+// Algorithm:
+//  1. Query the DB for all fingerprints whose hash appears in the query clip.
+//  2. For each DB match, compute the time offset (dbAnchorTime - queryAnchorTime).
+//  3. Bin those offsets into a histogram. If a song truly matches, all its
+//     matching fingerprints will have nearly the same offset (the position of
+//     the clip within the song). This creates a sharp histogram spike.
+//  4. Score each song by the height of its tallest offset bin.
+//  5. Apply coherence filtering and return the top N results with confidence labels.
+func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong, error) {
 	if len(queryFingerprints) == 0 {
 		return nil, nil
 	}
 
-	sampleFingerprintMap := make(map[uint32]float64)
-	hashes := make([]uint32, 0, len(queryFingerprints))
+	// Build hash → []anchorTime map (multimap — same hash can appear multiple times)
+	queryMap := make(map[uint64][]float64, len(queryFingerprints))
+	hashes := make([]uint64, 0, len(queryFingerprints))
+	seen := make(map[uint64]bool)
 	for _, fp := range queryFingerprints {
-		sampleFingerprintMap[fp.Hash] = fp.AnchorTime
-		hashes = append(hashes, fp.Hash)
+		queryMap[fp.Hash] = append(queryMap[fp.Hash], fp.AnchorTime)
+		if !seen[fp.Hash] {
+			hashes = append(hashes, fp.Hash)
+			seen[fp.Hash] = true
+		}
 	}
-	var matchedFingerprints []db.Fingerprint
-	// Group by song_id, count hashes, and filter in SQL
+
+	// Pre-filter: only fetch songs that have enough hash hits to be worth scoring.
+	// The 10% threshold avoids loading thousands of rows for songs with 1-2 lucky collisions.
 	subQuery := DB.Model(&db.Fingerprint{}).
 		Select("song_id").
 		Where("hash IN ?", hashes).
 		Group("song_id").
-		Having("COUNT(*) > ?", float64(len(hashes))*0.2)
+		Having("COUNT(*) >= ?", math.Max(float64(MIN_HASH_MATCHES), float64(len(hashes))*0.05))
 
-	if err := DB.Where("hash IN ? and song_id IN (?)", hashes, subQuery).
-		Find(&matchedFingerprints).Error; err != nil {
-		return nil, fmt.Errorf("failed DB query: %w", err)
-
+	var dbMatches []db.Fingerprint
+	if err := DB.
+		Where("hash IN ? AND song_id IN (?)", hashes, subQuery).
+		Find(&dbMatches).Error; err != nil {
+		return nil, fmt.Errorf("DB query failed: %w", err)
 	}
-	fmt.Println("LENGTH OF MATCHED FINGERPRINTS", len(matchedFingerprints))
-	matches := make(map[string][][2]uint32)
-	timestamps := make(map[string]float64)
-	targetZones := make(map[string]map[float64]int)
+	fmt.Printf("[search] db candidates: %d\n", len(dbMatches))
 
-	for _, dbFp := range matchedFingerprints {
-		sampleTime, ok := sampleFingerprintMap[dbFp.Hash]
+	// --- Offset histogram ---
+	// key: (songID, offsetBin) → count of coherent matches
+	type offsetKey struct {
+		songID string
+		bin    int64
+	}
+	histogram := make(map[offsetKey]int)
+	totalMatches := make(map[string]int) // total raw matches per song
+
+	for _, dbFp := range dbMatches {
+		queryTimes, ok := queryMap[dbFp.Hash]
 		if !ok {
 			continue
 		}
-
-		matches[dbFp.SongID] = append(matches[dbFp.SongID], [2]uint32{uint32(sampleTime), uint32(dbFp.AnchorTime)})
-
-		if _, ok := timestamps[dbFp.SongID]; !ok || dbFp.AnchorTime < timestamps[dbFp.SongID] {
-			timestamps[dbFp.SongID] = dbFp.AnchorTime
+		totalMatches[dbFp.SongID]++
+		for _, qt := range queryTimes {
+			// Offset = where in the DB song does this query clip start?
+			offsetMs := (dbFp.AnchorTime - qt) * 1000
+			bin := int64(math.Floor(offsetMs / OFFSET_BIN_MS))
+			histogram[offsetKey{dbFp.SongID, bin}]++
 		}
-
-		if _, ok := targetZones[dbFp.SongID]; !ok {
-			targetZones[dbFp.SongID] = make(map[float64]int)
-		}
-		targetZones[dbFp.SongID][dbFp.AnchorTime]++
 	}
 
-	scores := analyzeRelativeTiming(matches)
-	var result []MatchedSongOptimized
-
-	for songID, score := range scores {
-
-		match := MatchedSongOptimized{
-			SongID: songID,
-			Offset: timestamps[songID],
-			Score:  score,
+	// Find the best offset bin score per song
+	bestBinScore := make(map[string]int)
+	bestOffset := make(map[string]float64)
+	for key, count := range histogram {
+		if count > bestBinScore[key.songID] {
+			bestBinScore[key.songID] = count
+			bestOffset[key.songID] = float64(key.bin) * OFFSET_BIN_MS / 1000.0
 		}
-		result = append(result, match)
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Score > result[j].Score
+	// Build result list, applying coherence filter
+	var results []MatchedSong
+	for songID, score := range bestBinScore {
+		total := totalMatches[songID]
+		coherenceRatio := float64(score) / float64(total)
+		if coherenceRatio < MIN_COHERENCE_RATIO {
+			continue // matches are scattered — likely false positive
+		}
+
+		results = append(results, MatchedSong{
+			SongID:     songID,
+			Score:      float64(score),
+			Offset:     bestOffset[songID],
+			Confidence: confidenceLabel(score),
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
 	})
-	if len(result) > fingerprint.FAN_OUT {
-		return result[:fingerprint.FAN_OUT], nil
-	} else {
 
-		return result, nil
+	if len(results) > TOP_N_RESULTS {
+		results = results[:TOP_N_RESULTS]
 	}
+	return results, nil
 }
 
-func analyzeRelativeTiming(matches map[string][][2]uint32) map[string]float64 {
-	scores := make(map[string]float64)
-	for songID, times := range matches {
-		count := 0
-		for i := 0; i < len(times); i++ {
-			for j := i + 1; j < len(times); j++ {
-				sampleDiff := math.Abs(float64(times[i][0] - times[j][0]))
-				dbDiff := math.Abs(float64(times[i][1] - times[j][1]))
-				if math.Abs(sampleDiff-dbDiff) < 50 {
-					count++
-				}
-
-			}
-		}
-		scores[songID] = float64(count)
+func confidenceLabel(score int) string {
+	switch {
+	case score >= HIGH_CONFIDENCE_SCORE:
+		return "high"
+	case score >= MEDIUM_CONFIDENCE_SCORE:
+		return "medium"
+	default:
+		return "low"
 	}
-	return scores
 }
 
 func RecogniseSong(c *gin.Context) {
-	defer os.Remove("temp.wav")
-	MultipartForm, err := c.MultipartForm()
-	if err != nil {
-		c.JSON(400, gin.H{"error": "Failed to read multipart form"})
+	form, err := c.MultipartForm()
+	if err != nil || form == nil {
+		c.JSON(400, gin.H{"error": "failed to read multipart form"})
 		return
 	}
 
-	if MultipartForm == nil {
-		c.JSON(400, gin.H{"error": "No audio file provided"})
-		return
-	}
-	audios := MultipartForm.File["audio"]
-
-	if len(audios) == 0 {
-		c.JSON(400, gin.H{"error": "No audio file provided"})
+	files := form.File["audio"]
+	if len(files) == 0 {
+		c.JSON(400, gin.H{"error": "no audio file provided (field: 'audio')"})
 		return
 	}
 
-	audioData := audios[0]
-	fmt.Println(audioData.Filename)
+	audioData := files[0]
+	fmt.Println("[search] received:", audioData.Filename)
 
-	file1, err := audioData.Open()
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-
-	}
-	defer file1.Close()
-	temp, err := os.Create("temp.wav")
+	src, err := audioData.Open()
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	defer temp.Close()
+	defer src.Close()
 
-	// Write the uploaded audio file to temp.wav
-	_, err = file1.Seek(0, 0)
+	// Use a temp file with a unique name — avoids corruption under concurrent requests
+	tmp, err := os.CreateTemp("", "shazam-query-*.wav")
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	_, err = temp.ReadFrom(file1)
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	if _, err = tmp.ReadFrom(src); err != nil {
+		c.JSON(500, gin.H{"error": "failed to buffer audio: " + err.Error()})
+		return
+	}
+
+	// Reopen for reading (ReadFrom leaves write cursor at end of file)
+	readFile, err := os.Open(tmp.Name())
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
-
 	}
-	file2, err := os.Open("temp.wav")
+	defer readFile.Close()
+
+	samples, err := audio.DownSamplingAudio(readFile, audioData.Filename)
+	if err != nil {
+		c.JSON(422, gin.H{"error": "audio processing failed: " + err.Error()})
+		return
+	}
+
+	fps := fingerprint.Fingerprint(samples, "query")
+	results, err := MatchHashes(fps, db.DB)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	defer file2.Close()
-	samples, err := audio.DownSamplingAudio(file2, "temp.wav")
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-	}
-	fingerPrints := fingerprint.Fingerprint(samples, "song")
-	_data, _ := MatchHashes(fingerPrints, db.DB)
 
-	fmt.Println("SONG", _data)
-	c.JSON(200, _data)
-	runtime.GC()
-
+	fmt.Println("[search] results:", results)
+	c.JSON(200, results)
 }
