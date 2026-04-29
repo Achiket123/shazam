@@ -27,5 +27,7 @@ func main() {
 	r.POST("/upload", upload.FingerprintAPI) // index a song
 	r.POST("/search", search.RecogniseSong)  // recognise a clip
 
-	r.Run()
+	r.Run(":8080")
+
 }
+
