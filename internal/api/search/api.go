@@ -23,17 +23,17 @@ type MatchedSong struct {
 
 const (
 	// Minimum number of hash matches for a candidate to be considered at all.
-	MIN_HASH_MATCHES = 5
+	MIN_HASH_MATCHES = 2
 
 	// Offset histogram bin size in milliseconds.
 	// Matches within the same bin are considered temporally coherent.
 	// 20ms is tight enough to reject coincidental matches, loose enough to
 	// tolerate minor timing jitter from recording latency or resampling.
-	OFFSET_BIN_MS = 20
+	OFFSET_BIN_MS = 150
 
 	// A candidate must have at least this fraction of matches in its best
 	// offset bin to be returned. Filters out songs with scattered (random) matches.
-	MIN_COHERENCE_RATIO = 0.05
+	MIN_COHERENCE_RATIO = 0.01
 
 	TOP_N_RESULTS = 5
 
@@ -57,60 +57,92 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 		return nil, nil
 	}
 
-	// Build hash → []anchorTime map (multimap — same hash can appear multiple times)
+	// --- Build query map and deduplicated hashes ---
 	queryMap := make(map[uint64][]float64, len(queryFingerprints))
+	seen := make(map[uint64]struct{})
 	hashes := make([]uint64, 0, len(queryFingerprints))
-	seen := make(map[uint64]bool)
+
 	for _, fp := range queryFingerprints {
 		queryMap[fp.Hash] = append(queryMap[fp.Hash], fp.AnchorTime)
-		if !seen[fp.Hash] {
+
+		if _, ok := seen[fp.Hash]; !ok {
+			seen[fp.Hash] = struct{}{}
 			hashes = append(hashes, fp.Hash)
-			seen[fp.Hash] = true
 		}
 	}
 
-	// Pre-filter: only fetch songs that have enough hash hits to be worth scoring.
-	// The 10% threshold avoids loading thousands of rows for songs with 1-2 lucky collisions.
-	subQuery := DB.Model(&db.Fingerprint{}).
-		Select("song_id").
-		Where("hash IN ?", hashes).
-		Group("song_id").
-		Having("COUNT(*) >= ?", math.Max(float64(MIN_HASH_MATCHES), float64(len(hashes))*0.05))
+	// --- Limit hashes to avoid DB overload ---
+	const MAX_QUERY_HASHES = 20000
+	if len(hashes) > MAX_QUERY_HASHES {
+		hashes = hashes[:MAX_QUERY_HASHES]
+	}
+
+	// --- Batch DB queries ---
+	const BATCH_SIZE = 10000
 
 	var dbMatches []db.Fingerprint
-	if err := DB.
-		Where("hash IN ? AND song_id IN (?)", hashes, subQuery).
-		Find(&dbMatches).Error; err != nil {
-		return nil, fmt.Errorf("DB query failed: %w", err)
+
+	for i := 0; i < len(hashes); i += BATCH_SIZE {
+		end := i + BATCH_SIZE
+		if end > len(hashes) {
+			end = len(hashes)
+		}
+
+		batchHashes := hashes[i:end]
+
+		// --- Subquery for filtering strong candidates ---
+		subQuery := DB.Model(&db.Fingerprint{}).
+			Select("song_id").
+			Where("hash IN ?", batchHashes).
+			Group("song_id").
+			Having("COUNT(*) >= ?", math.Max(float64(MIN_HASH_MATCHES), float64(len(batchHashes))*0.05))
+
+		var batchMatches []db.Fingerprint
+		err := DB.
+			Where("hash IN ? AND song_id IN (?)", batchHashes, subQuery).
+			Find(&batchMatches).Error
+
+		if err != nil {
+			return nil, fmt.Errorf("DB query failed: %w", err)
+		}
+
+		dbMatches = append(dbMatches, batchMatches...)
 	}
+
 	fmt.Printf("[search] db candidates: %d\n", len(dbMatches))
 
+	if len(dbMatches) == 0 {
+		return nil, nil
+	}
+
 	// --- Offset histogram ---
-	// key: (songID, offsetBin) → count of coherent matches
 	type offsetKey struct {
 		songID string
 		bin    int64
 	}
+
 	histogram := make(map[offsetKey]int)
-	totalMatches := make(map[string]int) // total raw matches per song
+	totalMatches := make(map[string]int)
 
 	for _, dbFp := range dbMatches {
 		queryTimes, ok := queryMap[dbFp.Hash]
 		if !ok {
 			continue
 		}
+
 		totalMatches[dbFp.SongID]++
+
 		for _, qt := range queryTimes {
-			// Offset = where in the DB song does this query clip start?
 			offsetMs := (dbFp.AnchorTime - qt) * 1000
 			bin := int64(math.Floor(offsetMs / OFFSET_BIN_MS))
 			histogram[offsetKey{dbFp.SongID, bin}]++
 		}
 	}
 
-	// Find the best offset bin score per song
+	// --- Best offset per song ---
 	bestBinScore := make(map[string]int)
 	bestOffset := make(map[string]float64)
+
 	for key, count := range histogram {
 		if count > bestBinScore[key.songID] {
 			bestBinScore[key.songID] = count
@@ -118,13 +150,18 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 		}
 	}
 
-	// Build result list, applying coherence filter
-	var results []MatchedSong
+	// --- Build results ---
+	results := make([]MatchedSong, 0, len(bestBinScore))
+
 	for songID, score := range bestBinScore {
 		total := totalMatches[songID]
+		if total == 0 {
+			continue
+		}
+
 		coherenceRatio := float64(score) / float64(total)
 		if coherenceRatio < MIN_COHERENCE_RATIO {
-			continue // matches are scattered — likely false positive
+			continue
 		}
 
 		results = append(results, MatchedSong{
@@ -135,6 +172,7 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 		})
 	}
 
+	// --- Sort results ---
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
 	})
@@ -142,6 +180,7 @@ func MatchHashes(queryFingerprints []db.Fingerprint, DB *gorm.DB) ([]MatchedSong
 	if len(results) > TOP_N_RESULTS {
 		results = results[:TOP_N_RESULTS]
 	}
+
 	return results, nil
 }
 

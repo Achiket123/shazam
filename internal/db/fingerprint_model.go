@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -25,22 +26,22 @@ type Fingerprint struct {
 var DB *gorm.DB
 
 func EstablishConn() *gorm.DB {
-	godotenv.Load()
+	godotenv.Load(".env")
 
 	host, _ := os.LookupEnv("HOST")
 	dbname, _ := os.LookupEnv("DBNAME")
 	user, _ := os.LookupEnv("USER")
 	pass, _ := os.LookupEnv("PASS")
 	sslmode, _ := os.LookupEnv("SSLMODE")
-	port, _ := os.LookupEnv("PORT")
+	port, _ := os.LookupEnv("DBPORT")
 
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=Asia/Kolkata",
 		host, user, pass, dbname, port, sslmode,
 	)
-
+	log.Default().Println(dsn)
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
+		Logger: logger.Default.LogMode(logger.Error),
 	})
 	if err != nil {
 		panic(fmt.Errorf("failed to connect to database: %w", err))

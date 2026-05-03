@@ -2,7 +2,10 @@ package upload
 
 import (
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path"
 	"shazam/internal/audio"
 	"shazam/internal/db"
 	"shazam/internal/fingerprint"
@@ -49,4 +52,35 @@ func createHash(hashes []db.Fingerprint, DB *gorm.DB) error {
 		return nil
 	}
 	return DB.CreateInBatches(&hashes, 4000).Error
+}
+
+func FingerPrintLocal(dir string) error {
+	dirEntry, err := os.ReadDir(dir)
+	if err != nil {
+
+		return err
+	}
+	for i, val := range dirEntry {
+		log.Default().Printf("%d--%s", i+1, val.Name())
+		path_val := path.Join(dir, val.Name())
+		songFile, err := os.Open(path_val)
+		if err != nil {
+
+			return err
+		}
+		defer songFile.Close()
+
+		samples, err := audio.DownSamplingAudio(songFile, val.Name())
+		if err != nil {
+
+			return err
+		}
+
+		hashes := fingerprint.Fingerprint(samples, val.Name())
+		if err := createHash(hashes, db.DB); err != nil {
+
+			return err
+		}
+	}
+	return nil
 }

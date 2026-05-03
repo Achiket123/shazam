@@ -7,18 +7,18 @@ import (
 )
 
 const (
-	FAN_OUT = 15 // more pairings per anchor = more fingerprints = better recall under noise
+	FAN_OUT = 5 // more pairings per anchor = more fingerprints = better recall under noise
 
 	// Target zone for pairing: anchor peak searches forward in time within this window
 	TARGET_ZONE_DT_MAX_SECONDS = 2.0
 
 	// How many top peaks to keep per band per frame
-	MAX_PEAKS_PER_BAND = 3
+	MAX_PEAKS_PER_BAND = 4
 
 	// Z-score threshold — peaks must stand out from their local neighbourhood by this much.
 	// Per-band extraction means we can be more selective (higher threshold) without
 	// suppressing musically important peaks in quieter bands.
-	Z_SCORE_THRESHOLD = 2.5
+	Z_SCORE_THRESHOLD = 1.7
 
 	// Neighbourhood radius (frames × bins) used when computing the local mean/std
 	// for Z-score. Kept small so computation stays manageable.

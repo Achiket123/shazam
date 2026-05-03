@@ -40,3 +40,5 @@ go.work.sum
 # Editor/IDE
 # .idea/
 .vscode/
+downloads/
+script.py
