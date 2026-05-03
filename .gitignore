@@ -42,3 +42,5 @@ go.work.sum
 .vscode/
 downloads/
 script.py
+cookies/
+.context_cache/
